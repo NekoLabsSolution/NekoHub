@@ -1,0 +1,386 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Extensões nativas do Postgres
+// uuid-ossp e pgcrypto são usadas via gen_random_uuid()
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  BUYER
+  PRODUCER
+  ADMIN
+}
+
+enum ProductType {
+  COURSE
+  EBOOK
+  MEMBERSHIP
+  SOFTWARE
+  SERVICE
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum PriceType {
+  ONE_TIME
+  RECURRING
+}
+
+enum BillingInterval {
+  DAY
+  WEEK
+  MONTH
+  YEAR
+}
+
+enum OrderStatus {
+  PENDING    // aguardando pagamento
+  PROCESSING // processando no Stripe
+  PAID       // pago com sucesso
+  FAILED     // falha no pagamento
+  REFUNDED   // reembolsado
+  CHARGEBACK // chargeback aberto
+  CANCELLED  // cancelado antes de pagar
+}
+
+enum PaymentMethod {
+  CARD
+  PIX
+  BOLETO
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  UNPAID
+  PAUSED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+}
+
+enum AffiliateStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  REJECTED
+}
+
+enum CommissionStatus {
+  PENDING
+  APPROVED
+  PAID
+  REVERSED
+}
+
+enum ContentType {
+  VIDEO
+  AUDIO
+  PDF
+  LINK
+  TEXT
+  QUIZ
+}
+
+enum WebhookStatus {
+  PENDING
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email            String    @unique
+  fullName         String
+  cpf              String?   @unique @db.VarChar(14) // "000.000.000-00"
+  phone            String?   @db.VarChar(20)
+  stripeCustomerId String?   @unique // "cus_xxx"
+  role             UserRole  @default(BUYER)
+  emailVerifiedAt  DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  producer      Producer?
+  orders        Order[]
+  subscriptions Subscription[]
+  affiliates    Affiliate[]
+  productAccess ProductAccess[]
+
+  @@map("users")
+}
+
+model Producer {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String   @unique @db.Uuid
+  stripeAccountId String   @unique // "acct_xxx" — Stripe Connect Express/Standard
+  businessName    String
+  documentType    String   @db.VarChar(10) // "CPF" | "CNPJ"
+  documentNumber  String   @db.VarChar(20)
+  payoutSchedule  String   @default("WEEKLY") // "DAILY" | "WEEKLY" | "MONTHLY"
+  kycVerified     Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id])
+  products Product[]
+
+  @@map("producers")
+}
+
+model Product {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  producerId      String        @db.Uuid
+  stripeProductId String        @unique // "prod_xxx"
+  name            String
+  slug            String        @unique
+  description     String?       @db.Text
+  type            ProductType
+  status          ProductStatus @default(DRAFT)
+  currency        String        @default("BRL") @db.VarChar(3)
+  thumbnailUrl    String?
+  metadata        Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  producer      Producer        @relation(fields: [producerId], references: [id])
+  prices        Price[]
+  orders        Order[]
+  affiliates    Affiliate[]
+  subscriptions Subscription[]
+  modules       ContentModule[]
+  productAccess ProductAccess[]
+
+  @@index([producerId])
+  @@index([slug])
+  @@map("products")
+}
+
+model Price {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId       String           @db.Uuid
+  stripePriceId   String           @unique // "price_xxx"
+  type            PriceType
+  amountCents     Int              // valor em centavos, ex: 9700 = R$97,00
+  currency        String           @default("BRL") @db.VarChar(3)
+  interval        BillingInterval?
+  intervalCount   Int?             @default(1)
+  trialPeriodDays Int?
+  isDefault       Boolean          @default(false)
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  product       Product        @relation(fields: [productId], references: [id])
+  orders        Order[]
+  subscriptions Subscription[]
+
+  @@index([productId])
+  @@map("prices")
+}
+
+model Order {
+  id                      String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  buyerId                 String        @db.Uuid
+  productId               String        @db.Uuid
+  priceId                 String        @db.Uuid
+  affiliateId             String?       @db.Uuid
+
+  stripePaymentIntentId   String?       @unique // "pi_xxx" — nullable até criação no Stripe
+  stripeCheckoutSessionId String?       @unique // "cs_xxx" — nullable até criação no Stripe
+
+  status                  OrderStatus   @default(PENDING)
+  amountCents             Int
+  platformFeeCents        Int           // taxa da plataforma (ex: 9.9%)
+  affiliateCommissionCents Int          @default(0)
+  producerNetCents        Int           // amountCents - platformFee - affiliateCommission
+
+  paymentMethod           PaymentMethod?
+  currency                String        @default("BRL") @db.VarChar(3)
+
+  pixQrCode               String?       @db.Text     // payload EMV para leitura do QR
+  pixQrCodeExpiry         DateTime?                  // expiração do QR Code Pix
+
+  iofCents                Int           @default(0)  // IOF 3.5% para compradores BR em empresa estrangeira
+
+  paidAt                  DateTime?
+  refundedAt              DateTime?
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+
+  buyer      User           @relation(fields: [buyerId], references: [id])
+  product    Product        @relation(fields: [productId], references: [id])
+  price      Price          @relation(fields: [priceId], references: [id])
+  affiliate  Affiliate?     @relation(fields: [affiliateId], references: [id])
+  commission Commission?
+  access     ProductAccess?
+
+  @@index([buyerId])
+  @@index([stripePaymentIntentId])
+  @@index([status])
+  @@map("orders")
+}
+
+model Subscription {
+  id                   String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  buyerId              String             @db.Uuid
+  productId            String             @db.Uuid
+  priceId              String             @db.Uuid
+  stripeSubscriptionId String             @unique // "sub_xxx"
+  status               SubscriptionStatus @default(INCOMPLETE)
+  currentPeriodStart   DateTime
+  currentPeriodEnd     DateTime
+  cancelAtPeriodEnd    Boolean            @default(false)
+  canceledAt           DateTime?
+  trialStart           DateTime?
+  trialEnd             DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  buyer   User           @relation(fields: [buyerId], references: [id])
+  product Product        @relation(fields: [productId], references: [id])
+  price   Price          @relation(fields: [priceId], references: [id])
+  access  ProductAccess?
+
+  @@index([buyerId])
+  @@index([stripeSubscriptionId])
+  @@map("subscriptions")
+}
+
+model Affiliate {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String          @db.Uuid
+  productId       String          @db.Uuid
+  referralCode    String          @unique @db.VarChar(16)
+  commissionRate  Decimal         @db.Decimal(5, 4) // ex: 0.3000 = 30%
+  stripeAccountId String?                           // "acct_xxx" — Connect para receber repasse
+  status          AffiliateStatus @default(PENDING)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id])
+  product     Product      @relation(fields: [productId], references: [id])
+  orders      Order[]
+  commissions Commission[]
+
+  @@unique([userId, productId])
+  @@index([referralCode])
+  @@map("affiliates")
+}
+
+model Commission {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  affiliateId      String           @db.Uuid
+  orderId          String           @unique @db.Uuid
+  amountCents      Int
+  stripeTransferId String?          @unique // "tr_xxx" — Transfer do Connect após aprovação
+  status           CommissionStatus @default(PENDING)
+  paidAt           DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  affiliate Affiliate @relation(fields: [affiliateId], references: [id])
+  order     Order     @relation(fields: [orderId], references: [id])
+
+  @@index([affiliateId])
+  @@map("commissions")
+}
+
+model ProductAccess {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  buyerId        String    @db.Uuid
+  productId      String    @db.Uuid
+  orderId        String?   @unique @db.Uuid
+  subscriptionId String?   @unique @db.Uuid
+  isActive       Boolean   @default(true)
+  expiresAt      DateTime? // null = acesso vitalício
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  buyer        User          @relation(fields: [buyerId], references: [id])
+  product      Product       @relation(fields: [productId], references: [id])
+  order        Order?        @relation(fields: [orderId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@unique([buyerId, productId])
+  @@index([buyerId, isActive])
+  @@map("product_access")
+}
+
+model ContentModule {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  title     String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product       @relation(fields: [productId], references: [id])
+  items   ContentItem[]
+
+  @@index([productId, sortOrder])
+  @@map("content_modules")
+}
+
+model ContentItem {
+  id              String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  moduleId        String      @db.Uuid
+  title           String
+  type            ContentType
+  storageUrl      String?     // S3, Bunny CDN, etc.
+  durationSeconds Int?        // para vídeo/áudio
+  isPreview       Boolean     @default(false) // acessível sem compra
+  sortOrder       Int         @default(0)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  module ContentModule @relation(fields: [moduleId], references: [id])
+
+  @@index([moduleId, sortOrder])
+  @@map("content_items")
+}
+
+model WebhookLog {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  stripeEventId String        @unique // "evt_xxx" — garante idempotência
+  eventType     String        // ex: "payment_intent.succeeded"
+  payload       Json          // corpo completo do evento Stripe
+  status        WebhookStatus @default(PENDING)
+  retryCount    Int           @default(0)
+  errorMessage  String?       @db.Text
+  processedAt   DateTime?
+  createdAt     DateTime      @default(now())
+
+  // Eventos críticos:
+  // payment_intent.succeeded        -> PAID + liberar ProductAccess
+  // payment_intent.payment_failed   -> FAILED
+  // charge.dispute.created          -> CHARGEBACK
+  // customer.subscription.updated   -> sincronizar Subscription.status
+  // customer.subscription.deleted   -> CANCELLED + desativar ProductAccess
+  // invoice.paid                    -> renovar currentPeriodEnd
+  // invoice.payment_failed          -> PAST_DUE
+  // account.updated (Connect)       -> atualizar kycVerified em Producer/Affiliate
+
+  @@index([eventType])
+  @@index([status, createdAt])
+  @@map("webhooks_log")
+}

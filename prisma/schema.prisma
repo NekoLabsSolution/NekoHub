@@ -112,6 +112,7 @@ model User {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email            String    @unique
   fullName         String
+  passwordHash     String
   cpf              String?   @unique @db.VarChar(14) // "000.000.000-00"
   phone            String?   @db.VarChar(20)
   stripeCustomerId String?   @unique // "cus_xxx"
@@ -133,11 +134,13 @@ model Producer {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId          String   @unique @db.Uuid
   stripeAccountId String   @unique // "acct_xxx" — Stripe Connect Express/Standard
-  businessName    String
-  documentType    String   @db.VarChar(10) // "CPF" | "CNPJ"
-  documentNumber  String   @db.VarChar(20)
+  businessName    String?
+  documentType    String?  @db.VarChar(10) // "CPF" | "CNPJ"
+  documentNumber  String?  @db.VarChar(20)
   payoutSchedule  String   @default("WEEKLY") // "DAILY" | "WEEKLY" | "MONTHLY"
   kycVerified     Boolean  @default(false)
+  chargesEnabled  Boolean  @default(false)
+  payoutsEnabled  Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
